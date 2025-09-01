@@ -1,89 +1,158 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import {
+	App,
+	Menu,
+	Notice,
+	Plugin,
+	PluginSettingTab,
+	Setting,
+	TFile,
+} from "obsidian";
 
 // Remember to rename these classes and interfaces!
 
 interface MyPluginSettings {
-	mySetting: string;
+	credentials: {
+		username: string;
+		password: string;
+	};
+	notesWebhookUrl: string;
+	embeddingsWebhookUrl: string;
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
+	credentials: {
+		username: "",
+		password: "",
+	},
+	notesWebhookUrl: "",
+	embeddingsWebhookUrl: "",
+};
 
 export default class MyPlugin extends Plugin {
 	settings: MyPluginSettings;
 
 	async onload() {
 		await this.loadSettings();
-
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+		// Registrar la pestaña de settings
+		this.addSettingTab(new MyPluginSettingTab(this.app, this));
+		this.registerEvent(
+			this.app.workspace.on("file-menu", (menu: Menu, file: TFile) => {
+				// Solo queremos archivos markdown
+				if (file.extension === "md") {
+					menu.addItem((item) => {
+						item.setTitle("Generar nota mejorada")
+							.setIcon("sparkles") // Puedes elegir otro icono si quieres
+							.onClick(async () => {
+								await this.sendMdToApi(file);
+							});
+					});
 				}
+				if (file.extension === "pdf") {
+					menu.addItem((item) => {
+						item.setTitle("Vectorizar")
+							.setIcon("database-zap")
+							.onClick(async () => {
+								await this.sendPdfToApi(file);
+							});
+					});
+				}
+			})
+		);
+	}
+
+	async sendMdToApi(file: TFile) {
+		// Obtiene el contenido del archivo
+		const fileContent = await this.app.vault.read(file);
+
+		// Obtiene el path completo y el directorio
+		const filePath = file.path;
+		let dirPath = filePath.substring(0, filePath.lastIndexOf("/"));
+
+		// Cortamos el primer path, ya que siempre sera el nombre del repo
+		dirPath = dirPath.substring(dirPath.indexOf("/") + 1);
+
+		// Construye el payload
+		const payload = {
+			fileName: file.name,
+			filePath: filePath,
+			dirPath: dirPath,
+			content: fileContent,
+			title: file.basename,
+		};
+
+		// Envía la información a la API
+		try {
+			const response = await fetch(this.settings.notesWebhookUrl, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					// agregamos basic auth
+					Authorization:
+						"Basic " +
+						btoa(
+							this.settings.credentials.username +
+								":" +
+								this.settings.credentials.password
+						),
+				},
+				body: JSON.stringify(payload),
+			});
+
+			if (response.ok) {
+				new Notice("Archivo enviado correctamente.");
+			} else {
+				new Notice("Error al enviar el archivo.");
 			}
-		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+		} catch (error) {
+			new Notice("Error de red al enviar el archivo.");
+			console.error(error);
+		}
 	}
 
-	onunload() {
+	async sendPdfToApi(file: TFile) {
+		try {
+			// Lee el archivo como binario
+			const arrayBuffer = await this.app.vault.readBinary(file);
 
+			// Crea un blob y un FormData
+			const blob = new Blob([arrayBuffer], { type: "application/pdf" });
+			const formData = new FormData();
+			formData.append("file", blob, file.name);
+
+			// Envía el archivo al webhook de n8n con auth
+			const response = await fetch(this.settings.embeddingsWebhookUrl, {
+				method: "POST",
+				headers: {
+					Authorization:
+						"Basic " +
+						btoa(
+							this.settings.credentials.username +
+								":" +
+								this.settings.credentials.password
+						),
+				},
+				body: formData,
+			});
+
+			if (response.ok) {
+				new Notice("PDF enviado a n8n correctamente.");
+			} else {
+				new Notice("Error al enviar el PDF a n8n.");
+			}
+		} catch (error) {
+			new Notice("Error de red al enviar el PDF a n8n.");
+			console.error(error);
+		}
 	}
+
+	onunload() {}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		this.settings = Object.assign(
+			{},
+			DEFAULT_SETTINGS,
+			await this.loadData()
+		);
 	}
 
 	async saveSettings() {
@@ -91,23 +160,7 @@ export default class MyPlugin extends Plugin {
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
-
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
+class MyPluginSettingTab extends PluginSettingTab {
 	plugin: MyPlugin;
 
 	constructor(app: App, plugin: MyPlugin) {
@@ -116,19 +169,64 @@ class SampleSettingTab extends PluginSettingTab {
 	}
 
 	display(): void {
-		const {containerEl} = this;
+		const { containerEl } = this;
 
 		containerEl.empty();
 
+		containerEl.createEl("h2", { text: "Configuración de credenciales" });
+
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
+			.setName("Usuario")
+			.setDesc("Usuario para autenticación")
+			.addText((text) =>
+				text
+					.setPlaceholder("usuario")
+					.setValue(this.plugin.settings.credentials.username)
+					.onChange(async (value) => {
+						this.plugin.settings.credentials.username = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Contraseña")
+			.setDesc("Contraseña para autenticación")
+			.addText(
+				(text) =>
+					text
+						.setPlaceholder("contraseña")
+						.setValue(this.plugin.settings.credentials.password)
+						.onChange(async (value) => {
+							this.plugin.settings.credentials.password = value;
+							await this.plugin.saveSettings();
+						})
+						.inputEl.setAttribute("type", "password") // Oculta el texto
+			);
+
+		new Setting(containerEl)
+			.setName("URL de la API")
+			.setDesc("URL de la API")
+			.addText((text) =>
+				text
+					.setPlaceholder("url")
+					.setValue(this.plugin.settings.notesWebhookUrl)
+					.onChange(async (value) => {
+						this.plugin.settings.notesWebhookUrl = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("URL de la API de embeddings")
+			.setDesc("URL de la API de embeddings")
+			.addText((text) =>
+				text
+					.setPlaceholder("url")
+					.setValue(this.plugin.settings.embeddingsWebhookUrl)
+					.onChange(async (value) => {
+						this.plugin.settings.embeddingsWebhookUrl = value;
+						await this.plugin.saveSettings();
+					})
+			);
 	}
 }
