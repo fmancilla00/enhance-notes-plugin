@@ -1,6 +1,7 @@
 import {
 	App,
 	Menu,
+	Modal,
 	Notice,
 	Plugin,
 	PluginSettingTab,
@@ -28,6 +29,57 @@ const DEFAULT_SETTINGS: MyPluginSettings = {
 	embeddingsWebhookUrl: "",
 };
 
+class NamespaceModal extends Modal {
+	namespace: string;
+	onSubmit: (namespace: string) => void;
+	title: string;
+	description: string;
+
+	constructor(
+		app: App,
+		initialNamespace: string,
+		onSubmit: (namespace: string) => void,
+		title: string,
+		description: string
+	) {
+		super(app);
+		this.namespace = initialNamespace;
+		this.onSubmit = onSubmit;
+		this.title = title;
+		this.description = description;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.createEl("h2", { text: this.title });
+
+		new Setting(contentEl)
+			.setName("Namespace")
+			.setDesc(this.description)
+			.addText((text) =>
+				text
+					.setPlaceholder("namespace")
+					.setValue(this.namespace)
+					.onChange((value) => {
+						this.namespace = value;
+					})
+			);
+
+		new Setting(contentEl).addButton((btn) =>
+			btn
+				.setButtonText("Enviar")
+				.setCta()
+				.onClick(() => {
+					this.close();
+					this.onSubmit(this.namespace);
+				})
+		);
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+}
 export default class MyPlugin extends Plugin {
 	settings: MyPluginSettings;
 
@@ -67,46 +119,59 @@ export default class MyPlugin extends Plugin {
 		// Obtiene el path completo y el directorio
 		const filePath = file.path;
 		let dirPath = filePath.substring(0, filePath.lastIndexOf("/"));
-
-		// Cortamos el primer path, ya que siempre sera el nombre del repo
 		dirPath = dirPath.substring(dirPath.indexOf("/") + 1);
 
-		// Construye el payload
-		const payload = {
-			fileName: file.name,
-			filePath: filePath,
-			dirPath: dirPath,
-			content: fileContent,
-			title: file.basename,
-		};
+		const dirArray = dirPath.split("/");
+		const baseDir = dirArray.length > 0 ? dirArray[0] : dirPath;
 
-		// Envía la información a la API
-		try {
-			const response = await fetch(this.settings.notesWebhookUrl, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					// agregamos basic auth
-					Authorization:
-						"Basic " +
-						btoa(
-							this.settings.credentials.username +
-								":" +
-								this.settings.credentials.password
-						),
-				},
-				body: JSON.stringify(payload),
-			});
+		// Abrir el modal para editar el namespace
+		new NamespaceModal(
+			this.app,
+			baseDir,
+			async (namespace) => {
+				// Construye el payload
+				const payload = {
+					fileName: file.name,
+					filePath: filePath,
+					dirPath: dirPath,
+					content: fileContent,
+					title: file.basename,
+					baseDir: namespace, // Usar el valor del modal
+				};
 
-			if (response.ok) {
-				new Notice("Archivo enviado correctamente.");
-			} else {
-				new Notice("Error al enviar el archivo.");
-			}
-		} catch (error) {
-			new Notice("Error de red al enviar el archivo.");
-			console.error(error);
-		}
+				// Envía la información a la API
+				try {
+					const response = await fetch(
+						this.settings.notesWebhookUrl,
+						{
+							method: "POST",
+							headers: {
+								"Content-Type": "application/json",
+								Authorization:
+									"Basic " +
+									btoa(
+										this.settings.credentials.username +
+											":" +
+											this.settings.credentials.password
+									),
+							},
+							body: JSON.stringify(payload),
+						}
+					);
+
+					if (response.ok) {
+						new Notice("Archivo enviado correctamente.");
+					} else {
+						new Notice("Error al enviar el archivo.");
+					}
+				} catch (error) {
+					new Notice("Error de red al enviar el archivo.");
+					console.error(error);
+				}
+			},
+			"Configurar namespace de búsqueda",
+			"Namespace donde se buscará información relacionada a esta nota"
+		).open();
 	}
 
 	async sendPdfToApi(file: TFile) {
@@ -119,26 +184,68 @@ export default class MyPlugin extends Plugin {
 			const formData = new FormData();
 			formData.append("file", blob, file.name);
 
-			// Envía el archivo al webhook de n8n con auth
-			const response = await fetch(this.settings.embeddingsWebhookUrl, {
-				method: "POST",
-				headers: {
-					Authorization:
-						"Basic " +
-						btoa(
-							this.settings.credentials.username +
-								":" +
-								this.settings.credentials.password
-						),
-				},
-				body: formData,
-			});
+			const filePath = file.path;
+			let dirPath = filePath.substring(0, filePath.lastIndexOf("/"));
 
-			if (response.ok) {
-				new Notice("PDF enviado a n8n correctamente.");
+			// Cortamos el primer path, ya que siempre sera el nombre del repo
+			dirPath = dirPath.substring(dirPath.indexOf("/") + 1);
+
+			// pnbtenemos el directorio base. Por ejemplo nlp/clase Dos, debe ser nlp
+			const dirArray = dirPath.split("/");
+			let baseDir = "";
+			if (dirArray.length > 0) {
+				baseDir = dirArray[0];
 			} else {
-				new Notice("Error al enviar el PDF a n8n.");
+				baseDir = dirPath;
 			}
+			formData.append("baseDir", baseDir);
+
+			new NamespaceModal(
+				this.app,
+				baseDir,
+				async (namespace) => {
+					try {
+						const arrayBuffer = await this.app.vault.readBinary(
+							file
+						);
+						const blob = new Blob([arrayBuffer], {
+							type: "application/pdf",
+						});
+						const formData = new FormData();
+						formData.append("file", blob, file.name);
+						formData.append("baseDir", namespace); // Usar el valor del modal
+
+						const response = await fetch(
+							this.settings.embeddingsWebhookUrl,
+							{
+								method: "POST",
+								headers: {
+									Authorization:
+										"Basic " +
+										btoa(
+											this.settings.credentials.username +
+												":" +
+												this.settings.credentials
+													.password
+										),
+								},
+								body: formData,
+							}
+						);
+
+						if (response.ok) {
+							new Notice("PDF enviado a n8n correctamente.");
+						} else {
+							new Notice("Error al enviar el PDF a n8n.");
+						}
+					} catch (error) {
+						new Notice("Error de red al enviar el PDF a n8n.");
+						console.error(error);
+					}
+				},
+				"Configurar namespace (Pinecone)",
+				"El namespace donde se guardará el PDF en Pinecone"
+			).open();
 		} catch (error) {
 			new Notice("Error de red al enviar el PDF a n8n.");
 			console.error(error);
